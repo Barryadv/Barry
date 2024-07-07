@@ -12,6 +12,7 @@ import numpy as np
 from tensorflow.keras.models import load_model
 import statsmodels.api as sm
 from tensorflow.keras.optimizers import Adam
+import joblib
 
 st.markdown("""
 ## Stock selector for single country equity portfolio
@@ -67,223 +68,140 @@ You can select from three approaches. We can add approaches to our model as desi
 3.	Long Short-Term Memory (LSTM) – a sequence model, which selects explanatory variables in several stages and passes the results to a subsequent stage that may select different explanatory variables. It’s considered a neural network model because that sequential process mimics our brain function. 
 
 ### **How to use**
-Select the equity pair for the model results
+Select the equity pair for the model results.
+
+This shows the Mean Average Error (lower is better, 0 is a model with perfect forecasting), Root Square Mean Deviation (lower is better, 0 is a model with perfect forecasting), and Mean Absolute Percentage Error (% difference between predicted and actuals).
 
 """)
-options = ['Petrobras-Vale', 'Vale-Itau', 'Petrobras-Itau']
 
-# Create a radio button widget
-selected_option = st.radio(
-    "Pick a pair",
-    options,
-    index=0,  # Default selected option
-    format_func=str,  # Function to format the display of the options
-    key=None,  # An optional key to uniquely identify this widget
-    help=None,  # An optional tooltip
-    on_change=None,  # An optional callback invoked when the value changes
-    args=None,  # Arguments to pass to the callback
-    kwargs=None,  # Keyword arguments to pass to the callback
-    disabled=False,  # Whether the widget is disabled
-    horizontal=False,  # Whether to lay out the radio buttons horizontally
-    label_visibility="visible"  # Visibility of the label: "visible", "hidden", or "collapsed"
-)
+# Read the statistics from the CSV file
+stats_df = pd.read_csv('test_comp_stats.csv')
 
-# Display the selected option
-st.write(f"Here are the mean absolute errors of the models (lower is better): {selected_option}")
+# Add radio buttons for model selection
+selected_model = st.radio('Select the model:', ['PV', 'PI', 'VI'])
 
-# Read the MAE values from the CSV file
-pv_mae = pd.read_csv('pv_mae_values.csv')
+# Function to filter and display statistics based on selected model
+def display_statistics(model_prefix):
+    filtered_stats = stats_df[stats_df['Model'].str.startswith(model_prefix)]
+    st.write(f"Model Performance Statistics for {model_prefix}:")
+    st.table(filtered_stats.reset_index(drop=True))
 
-# Display the MAE values if "Petrobras-Vale" is selected
-if selected_option == "Petrobras-Vale":
-    # Highlight the row with the minimum MAE
-    def highlight_min(data):
-        attr = 'background-color: yellow'
-        is_min = data['MAE'] == data['MAE'].min()
-        return pd.DataFrame(attr, index=data.index, columns=data.columns).where(is_min, '')
+# Display statistics based on selected radio button
+display_statistics(selected_model)
 
-    # Apply highlighting
-    df_mae_styled = pv_mae.style.apply(highlight_min, axis=None)
+# SARIMAX model forecast
+# Load SARIMAX models
+with open('model_PV.pkl', 'rb') as f:
+    model_PV = pickle.load(f)
+with open('model_PI.pkl', 'rb') as f:
+    model_PI = pickle.load(f)
+with open('model_VI.pkl', 'rb') as f:
+    model_VI = pickle.load(f)
 
-    # Debugging step: Check the styled DataFrame
-    st.write("Styled DataFrame (HTML):")
-    st.write(df_mae_styled.to_html(escape=False), unsafe_allow_html=True)
+# Define SARIMAX prediction function
+def predict_ols(x, model, cols):
+    df = pd.DataFrame([x], columns=cols)
+    df_with_const = sm.add_constant(df, has_constant='add')
+    return model.predict(df_with_const)[0]
 
+# Streamlit app - SARIMAX Section
+st.title("Forecast the Next Period")
 
-# Display instructions
-st.write("""
-### **Forecast the next period**
-Insert seasonally adjusted, 2-month change values for Brazil retail sales and loans, China loans (manual seasonal adjusted), US retail sales, and BRL 2-month change lagged by one period.
-""")
+st.header("SARIMAX Model")
 
-# Load the trained regression model
-with open('regression_model.pkl', 'rb') as f:
-    model = pickle.load(f)
+# Checkbox for selecting series
+options_sarimax = {
+    'PV-SARIMAX': 'PV',
+    'PI-SARIMAX': 'PI',
+    'VI-SARIMAX': 'VI'
+}
 
-# Function to classify new observation
-def classify_new_observation(model, scaler_X, scaler_y, new_observation):
-    """
-    Classify a new observation using the trained LSTM model and scalers.
-    
-    Parameters:
-    model (Sequential): Trained LSTM model.
-    scaler_X (StandardScaler): Scaler used for feature scaling.
-    scaler_y (StandardScaler): Scaler used for target scaling.
-    new_observation (dict): Dictionary containing the new observation features.
-    
-    Returns:
-    float: Predicted value for PV.
-    """
-    # Convert the new observation to a DataFrame
-    new_data = pd.DataFrame([new_observation])
+selected_option_sarimax = st.radio("Select Series for SARIMAX Model:", list(options_sarimax.keys()))
 
-    # Define the feature order
-    feature_order = ['retail', 'loans', 'indout', 'ch_loans', 'us_retail', 'BRL', 'BOV']
+if selected_option_sarimax:
+    series_sarimax = options_sarimax[selected_option_sarimax]
 
-    # Standardize the new observation
-    new_data_scaled = scaler_X.transform(new_data[feature_order])
-    new_data_scaled = new_data_scaled.reshape((new_data_scaled.shape[0], new_data_scaled.shape[1], 1))
+    st.write(f"Selected: {series_sarimax} with SARIMAX")
 
-    # Predict the value of PV
-    prediction_scaled = model.predict(new_data_scaled)
-    prediction = scaler_y.inverse_transform(prediction_scaled)
+    if series_sarimax == 'PV':
+        x1_input = st.number_input('Lag of PV (PV_lag1):', format="%.3f", step=0.001)
+        x2_input = st.number_input('Lag of Bovespa (BOV_ch_lag1):', format="%.3f", step=0.001)
+        x3_input = st.number_input('Lag of change of Brazilian loans (br_loans_lag1):', format="%.3f", step=0.001)
 
-    return prediction[0][0]
+        if st.button('Predict PV using SARIMAX'):
+            prediction = predict_ols([x1_input, x2_input, x3_input], model_PV, ['PV_lag1', 'BOV_ch_lag1', 'br_loans_lag1'])
+            st.write(f"Prediction for next month's PV using SARIMAX: {prediction:.4f}")
+
+    elif series_sarimax == 'PI':
+        x1_input = st.number_input('Lag of PI (PI_lag1):', format="%.3f", step=0.001)
+        x2_input = st.number_input('Lag of Bovespa (BOV_ch_lag1):', format="%.3f", step=0.001)
+        x3_input = st.number_input('Lag of change of Brazilian loans (br_loans_lag1):', format="%.3f", step=0.001)
+
+        if st.button('Predict PI using SARIMAX'):
+            prediction = predict_ols([x1_input, x2_input, x3_input], model_PI, ['PI_lag1', 'BOV_ch_lag1', 'br_loans_lag1'])
+            st.write(f"Prediction for next month's PI using SARIMAX: {prediction:.4f}")
+
+    elif series_sarimax == 'VI':
+        x1_input = st.number_input('Lag of VI (VI_lag1):', format="%.3f", step=0.001)
+        x2_input = st.number_input('Lag of Bovespa (BOV_ch_lag1):', format="%.3f", step=0.001)
+        x3_input = st.number_input('Lag of change of Brazilian loans (br_loans_lag1):', format="%.3f", step=0.001)
+
+        if st.button('Predict VI using SARIMAX'):
+            prediction = predict_ols([x1_input, x2_input, x3_input], model_VI, ['VI_lag1', 'BOV_ch_lag1', 'br_loans_lag1'])
+            st.write(f"Prediction for next month's VI using SARIMAX: {prediction:.4f}")
 
 
+#forecast with KNN
+#failed to create because StandardScaler trained on five, kneighborsregressor takes 5. 
+#gave up after two hours
+            
+#Selected features for PV_k: ['PI_lag1' 'VI_lag1' 'BOV_ch_lag1' 'SPY_ch_lag1' 'br_loans_lag1']
+#Selected features for PI_k: ['PV_lag1' 'BRL_ch_lag1' 'BOV_ch_lag1' 'SPY_ch_lag1' 'br_loans_lag1']
+#Selected features for VI_k: ['PV_lag1' 'PI_lag1' 'SPY_ch_lag1' 'br_loans_lag1' 'us_ret_mom_lag1']
 
-# Load the trained regression model
-with open('regression_model.pkl', 'rb') as f:
-    model = pickle.load(f)
-
-# Function to make predictions
-def make_predictions(model, prev_return, change_bov):
-    # Create input data as a list
-    input_data = [prev_return, change_bov]
-    
-    # Convert input_data to a DataFrame and add a constant term for the intercept
-    input_data_df = pd.DataFrame([input_data], columns=['PV_lag1', 'BOV'])
-    input_data_with_const = sm.add_constant(input_data_df, has_constant='add')
-    
-    # Make predictions using the model
-    predictions = model.predict(input_data_with_const)
-    return predictions[0]
+# Load the wealth index data
+combined_wealth_PV = pd.read_csv('combined_wealth_PV.csv', index_col=0, parse_dates=True)
+combined_wealth_PI = pd.read_csv('combined_wealth_PI.csv', index_col=0, parse_dates=True)
+combined_wealth_VI = pd.read_csv('combined_wealth_VI.csv', index_col=0, parse_dates=True)
 
 # Streamlit app
-st.write("""
-### **SARIMAX prediction
-""")
+st.title("Wealth Index Visualization")
 
-# Input fields for user to enter values
-prev_return = st.text_input('Enter previous period\'s 2-month return:', value='0.0')
-change_bov = st.text_input('Enter 2-month change in BOV:', value='0.0')
+# Plot for PV
+st.subheader('Wealth Index Over Time for PV Strategies')
+fig_pv, ax_pv = plt.subplots(figsize=(14, 8))
+ax_pv.plot(combined_wealth_PV.index, combined_wealth_PV['Wealth_Index_PV_OLS'], label='Wealth Index PV OLS', color='blue')
+ax_pv.plot(combined_wealth_PV.index, combined_wealth_PV['Wealth_Index_PV_KNN'], label='Wealth Index PV KNN', color='purple')
+#ax_pv.plot(combined_wealth_PV.index, combined_wealth_PV['Wealth_Index_PV_LSTM'], label='Wealth Index PV LSTM', color='green')
+ax_pv.plot(combined_wealth_PV.index, combined_wealth_PV['Wealth_Index_PV_Portfolio'], label='Wealth Index PV Portfolio', color='black')
+ax_pv.set_title('Wealth Index Over Time for PV Strategies')
+ax_pv.set_xlabel('Date')
+ax_pv.set_ylabel('Wealth Index')
+ax_pv.legend()
+st.pyplot(fig_pv)
 
-# Convert input values to float
-try:
-    prev_return = float(prev_return)
-    change_bov = float(change_bov)
-except ValueError:
-    st.error('Please enter valid numbers for both fields.')
+# Plot for PI
+st.subheader('Wealth Index Over Time for PI Strategies')
+fig_pi, ax_pi = plt.subplots(figsize=(14, 8))
+ax_pi.plot(combined_wealth_PI.index, combined_wealth_PI['Wealth_Index_PI_OLS'], label='Wealth Index PI OLS', color='blue')
+ax_pi.plot(combined_wealth_PI.index, combined_wealth_PI['Wealth_Index_PI_KNN'], label='Wealth Index PI KNN', color='purple')
+#ax_pi.plot(combined_wealth_PI.index, combined_wealth_PI['Wealth_Index_PI_LSTM'], label='Wealth Index PI LSTM', color='green')
+ax_pi.plot(combined_wealth_PI.index, combined_wealth_PI['Wealth_Index_PI_Portfolio'], label='Wealth Index PI Portfolio', color='black')
+ax_pi.set_title('Wealth Index Over Time for PI Strategies')
+ax_pi.set_xlabel('Date')
+ax_pi.set_ylabel('Wealth Index')
+ax_pi.legend()
+st.pyplot(fig_pi)
 
-# Button to make prediction
-if st.button('Predict'):
-    if isinstance(prev_return, float) and isinstance(change_bov, float):
-        prediction = make_predictions(model, prev_return, change_bov)
-        st.write(f"Predicted Value for PV: {prediction}")
-
-# Display the input data for reference
-st.write("Input Data")
-st.write(pd.DataFrame([[prev_return, change_bov]], columns=['PV_lag1', 'BOV']))
-
-#KNN prediction
-st.write("""
-### KNN_selected prediction
-""")
-# Load the trained k-NN model
-with open('knn2.pkl', 'rb') as f:
-    knn_model = pickle.load(f)
-
-# Load the scaler
-with open('scaler_knn.pkl', 'rb') as f:
-    knn_scaler = pickle.load(f)
-
-# Function to classify a new observation with the k-NN model
-def classify_new_observation(knn_model, knn_scaler, new_observation):
-    new_data = pd.DataFrame([new_observation])
-    feature_order = ['loans', 'ch_loans', 'us_retail', 'BRL']
-    new_data = new_data[feature_order]  # Ensure correct feature order
-    new_data_scaled = knn_scaler.transform(new_data)
-    prediction = knn_model.predict(new_data_scaled)
-    return prediction[0]
-
-# Input fields for k-NN model
-loans = st.number_input('Enter value for loans:', value=0.0, key='knn_loans')
-ch_loans = st.number_input('Enter value for ch_loans:', value=0.0, key='knn_ch_loans')
-us_retail = st.number_input('Enter value for us_retail:', value=0.0, key='knn_us_retail')
-BRL = st.number_input('Enter value for BRL:', value=0.0, key='knn_BRL')
-
-# Collect user inputs into a dictionary
-input_data = {
-    'loans': loans,
-    'ch_loans': ch_loans,
-    'us_retail': us_retail,
-    'BRL': BRL
-}
-
-# Button to make prediction
-if st.button('Predict with k-NN', key='predict_knn'):
-    try:
-        prediction = classify_new_observation(knn_model, knn_scaler, input_data)
-        formatted_prediction = f"{prediction:.3f}"  # Format the integer prediction as a float with three decimal places
-        st.write(f"Predicted PV classification: {formatted_prediction}")
-    except Exception as e:
-        st.error(f"An error occurred: {e}")
-
-# Display the input data for reference
-st.write("""
-when 1, overweight the first stock in the pair. when 0, overweight the second.
-""")
-st.write("Input Data")
-st.write(pd.DataFrame([input_data]))
-
-
-
-### **LSTM prediction
-# Load the trained LSTM model
-
-st.write("""
-### LSTM prediction
-""")
-
-retail = st.number_input('Enter value for retail:', value=0.05, key='retail', format="%.3f")
-loans = st.number_input('Enter value for loans:', value=0.02, key='loans', format="%.3f")
-indout = st.number_input('Enter value for indout:', value=0.03, key='indout', format="%.3f")
-ch_loans = st.number_input('Enter value for ch_loans:', value=0.01, key='ch_loans', format="%.3f")
-us_retail = st.number_input('Enter value for us_retail:', value=0.04, key='us_retail', format="%.3f")
-BRL = st.number_input('Enter value for BRL:', value=-0.01, key='BRL', format="%.3f")
-BOV = st.number_input('Enter value for BOV:', value=0.02, key='BOV', format="%.3f")
-
-# Collect user inputs into a dictionary
-new_data = {
-    'retail': [retail],
-    'loans': [loans],
-    'indout': [indout],
-    'ch_loans': [ch_loans],
-    'us_retail': [us_retail],
-    'BRL': [BRL],
-    'BOV': [BOV]
-}
-
-# Convert the new input data to a DataFrame
-new_data_df = pd.DataFrame(new_data)
-
-# Button to show prediction
-if st.button('Predict', key='predict_button'):
-    # Display the forecasted value
-    st.write(f"Forecasted Value: 0.18")
-    st.write("Petrobras is expected to outperform Vale")
-
-# Display the input data
-st.write("Input Data")
-st.write(new_data_df)
-
+# Plot for VI
+st.subheader('Wealth Index Over Time for VI Strategies')
+fig_vi, ax_vi = plt.subplots(figsize=(14, 8))
+ax_vi.plot(combined_wealth_VI.index, combined_wealth_VI['Wealth_Index_VI_OLS'], label='Wealth Index VI OLS', color='blue')
+ax_vi.plot(combined_wealth_VI.index, combined_wealth_VI['Wealth_Index_VI_KNN'], label='Wealth Index VI KNN', color='purple')
+#ax_vi.plot(combined_wealth_VI.index, combined_wealth_VI['Wealth_Index_VI_LSTM'], label='Wealth Index VI LSTM', color='green')
+ax_vi.plot(combined_wealth_VI.index, combined_wealth_VI['Wealth_Index_VI_Portfolio'], label='Wealth Index VI Portfolio', color='black')
+ax_vi.set_title('Wealth Index Over Time for VI Strategies')
+ax_vi.set_xlabel('Date')
+ax_vi.set_ylabel('Wealth Index')
+ax_vi.legend()
+st.pyplot(fig_vi)
